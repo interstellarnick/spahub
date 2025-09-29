@@ -2,7 +2,6 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import plotly.express as px
 from datetime import date, timedelta
 from pathlib import Path
 import io
@@ -10,7 +9,7 @@ import re
 
 st.set_page_config(page_title="Spa Dashboard", layout="wide")
 
-# ====== Styling to match the provided app's UX/UI ======
+# ====== Styling (matches your prior app look) ======
 st.markdown(
     """
     <style>
@@ -20,22 +19,6 @@ st.markdown(
     .kpi-label {font-size:12px; color:#9ca3af; margin-bottom:6px;}
     .kpi-value {font-size:22px; font-weight:700;}
     .box {border:1px solid #1f2937; border-radius:12px; padding:16px; background: var(--background-color, #0b1220);}
-    </style>
-    """, unsafe_allow_html=True
-)
-st.markdown(
-    """
-    <style>
-    @media (max-width: 992px) {
-      .kpi-value { font-size: 18px !important; }
-      .kpi-label { font-size: 11px !important; }
-    }
-    @media (max-width: 600px) {
-      .kpi-value { font-size: 16px !important; }
-      .kpi-label { font-size: 10px !important; }
-      .topbar .title { font-size: 18px !important; }
-    }
-    section.main > div { padding-top: 0.5rem; }
     </style>
     """, unsafe_allow_html=True
 )
@@ -73,28 +56,6 @@ def coerce_money(s: pd.Series) -> pd.Series:
     s = s.str.replace(r"[^0-9.\\-]", "", regex=True)
     return pd.to_numeric(s, errors="coerce")
 
-def normalize_phone_value(val: object) -> str:
-    if val is None:
-        return ""
-    s = str(val).strip()
-    if s.lower() in {"nan", "none"}:
-        return ""
-    m = re.match(r"^(\\d+)\\.0+$", s)
-    if m:
-        s = m.group(1)
-    try:
-        f = float(s)
-        if f.is_integer():
-            s = str(int(f))
-    except Exception:
-        pass
-    digits = re.sub(r"\\D", "", s)
-    if len(digits) == 11 and digits.startswith("1"):
-        digits = digits[1:]
-    if len(digits) == 10:
-        return f"({digits[0:3]}) {digits[3:6]}-{digits[6:10]}"
-    return s
-
 def date_range_presets():
     return ["Last 7 days","Last 30 days","Last 90 days","This month","Last month","All time","Custom range"]
 
@@ -128,7 +89,7 @@ def apply_date_filter(df, col, sel_time, custom_start, custom_end, period_anchor
         f = f[(f[col] >= pd.to_datetime(custom_start)) & (f[col] <= pd.to_datetime(custom_end))]
     return f, anchor_date
 
-# ====== Load data (defaults to uploaded files in /mnt/data if present) ======
+# ====== Load data ======
 DEFAULT_APPTS = Path("/mnt/data/Salon Appointments-2025-09-25 (1).csv")
 DEFAULT_LINES = Path("/mnt/data/Checkout Line Items-2025-09-25.csv")
 
@@ -159,11 +120,11 @@ if appts.empty and lines.empty:
     st.warning("Upload your Appointments and Line Items CSVs to get started.")
     st.stop()
 
-# ====== Normalize columns / detect keys ======
+# ====== Normalize / detect columns ======
 appts.columns = [c.strip() for c in appts.columns]
 lines.columns = [c.strip() for c in lines.columns]
 
-APPT_DATE = pick_col(["Appointment Date","Date","Start Time","Start","Booked At","Appt Date","Appointment Start"], appts.columns)
+APPT_DATE = pick_col(["Appointment Date","Date","Start Time","Start","Booked At","Appt Date","Appointment Start","Date of Appointment"], appts.columns)
 APPT_CLIENT = pick_col(["Client","Customer","Client Name","Customer Name","Name"], appts.columns)
 APPT_SERVICE = pick_col(["Service","Services","Service Name","Menu Item","Item","Category"], appts.columns)
 APPT_PROVIDER = pick_col(["Provider","Employee","Staff","Service Provider","Artist","Technician","Therapist"], appts.columns)
@@ -197,8 +158,8 @@ if SALE_PROVIDER is None and SALE_TICKET and APPT_ID and APPT_PROVIDER:
         lines = merged
         SALE_PROVIDER = APPT_PROVIDER
 
-# ====== Filters row (horizontal) ======
-time_options = date_range_presets()
+# ====== Filters ======
+time_options = ["Last 7 days","Last 30 days","Last 90 days","This month","Last month","All time","Custom range"]
 providers = ["All Providers"]
 if SALE_PROVIDER and SALE_PROVIDER in lines.columns:
     providers += sorted([str(x) for x in lines[SALE_PROVIDER].dropna().unique().tolist()])
@@ -221,14 +182,14 @@ custom_start = custom_end = None
 if sel_time == "Custom range":
     cst, cen = st.columns(2)
     with cst:
-        custom_start = st.date_input("Start date", value=(appts[APPT_DATE].min().date() if APPT_DATE and appts[APPT_DATE].notna().any() else date.today() - timedelta(days=30)))
+        default_start = (appts[APPT_DATE].min().date() if APPT_DATE and appts[APPT_DATE].notna().any() else date.today() - timedelta(days=30))
+        custom_start = st.date_input("Start date", value=default_start)
     with cen:
-        custom_end = st.date_input("End date", value=(appts[APPT_DATE].max().date() if APPT_DATE and appts[APPT_DATE].notna().any() else date.today()))
+        default_end = (appts[APPT_DATE].max().date() if APPT_DATE and appts[APPT_DATE].notna().any() else date.today())
+        custom_end = st.date_input("End date", value=default_end)
 
-# ====== Build unified fact table (sales-level), with date/client/service/provider/amount ======
+# ====== Unified facts table ======
 facts = pd.DataFrame()
-
-# Prefer sales rows for revenue; if missing clients, backfill from appointments by id
 if not lines.empty:
     facts["Date"] = lines[SALE_DATE] if SALE_DATE in lines.columns else pd.NaT
     facts["Client"] = lines[SALE_CLIENT] if SALE_CLIENT in lines.columns else ""
@@ -236,7 +197,7 @@ if not lines.empty:
     facts["Provider"] = lines[SALE_PROVIDER] if SALE_PROVIDER in lines.columns else ""
     facts["Amount"] = lines[SALE_AMOUNT] if SALE_AMOUNT in lines.columns else 0.0
 
-# If clients missing in sales but present in appts + we have appointment ID, enrich
+# Backfill client via appt ID if needed
 if "Client" in facts.columns and facts["Client"].astype(str).str.strip().eq("").any() and SALE_TICKET and APPT_ID and APPT_CLIENT:
     try:
         facts = facts.join(lines[[SALE_TICKET]].rename(columns={SALE_TICKET:"__JOIN__"}))
@@ -247,11 +208,10 @@ if "Client" in facts.columns and facts["Client"].astype(str).str.strip().eq("").
     except Exception:
         pass
 
-# Ensure proper dtypes
 facts["Date"] = pd.to_datetime(facts["Date"], errors="coerce")
 facts["Amount"] = pd.to_numeric(facts["Amount"], errors="coerce").fillna(0.0)
 
-# ====== Apply filters: date, provider, service, search ======
+# ====== Apply filters ======
 all_dates = facts["Date"].dt.date if "Date" in facts else pd.Series([], dtype="object")
 filtered, anchor_date = apply_date_filter(facts, "Date", sel_time, custom_start, custom_end, period_anchor, all_dates)
 
@@ -270,11 +230,10 @@ if q:
 # ====== KPIs ======
 unique_clients = int(filtered["Client"].astype(str).str.strip().replace({"":"__NA__"}).nunique()) if "Client" in filtered else 0
 
-# Recurring clients and return rate: count distinct dates per client (from appointments if we have them, else from filtered facts)
+# Recurring clients and return rate based on appointments (preferred)
 recurring_clients = 0
 return_rate = 0.0
 if APPT_CLIENT and APPT_DATE and not appts.empty:
-    # Align date filter with appointments too
     appts_copy = appts.copy()
     appts_copy[APPT_DATE] = pd.to_datetime(appts_copy[APPT_DATE], errors="coerce")
     appts_filtered, _ = apply_date_filter(appts_copy, APPT_DATE, sel_time, custom_start, custom_end, period_anchor, appts_copy[APPT_DATE].dt.date)
@@ -304,63 +263,92 @@ with k3:
 with k4:
     st.markdown(f'<div class="kpi-card"><div class="kpi-label">Total Revenue</div><div class="kpi-value">${total_revenue:,.2f}</div></div>', unsafe_allow_html=True)
 
-st.write("")
 if anchor_date is not None:
     st.caption(f"Using **{period_anchor}** as {anchor_date:%b %d, %Y}.")
 
-# ====== Charts ======
-CHART_HEIGHT = 360
-c_left, c_right = st.columns(2)
+# ====== First-time vs Returning ======
+# Definition: A client is "First-time" if their first-ever appointment date (from APPTS) falls within the current filtered period;
+# otherwise they are "Returning" when they have activity in the filtered period.
+ft_map = pd.Series(dtype="datetime64[ns]")
+if APPT_CLIENT and APPT_DATE and not appts.empty:
+    appts_nonnull = appts.dropna(subset=[APPT_CLIENT, APPT_DATE]).copy()
+    appts_nonnull[APPT_DATE] = pd.to_datetime(appts_nonnull[APPT_DATE], errors="coerce")
+    first_seen = appts_nonnull.groupby(APPT_CLIENT)[APPT_DATE].min()
+    ft_map = first_seen
 
-# Revenue by Service
+filtered_clients = filtered.dropna(subset=["Client"]).copy() if "Client" in filtered else pd.DataFrame(columns=["Client"])
+filtered_clients = filtered_clients[["Client"]].drop_duplicates()
+if not filtered_clients.empty and not ft_map.empty and "Date" in filtered:
+    # get filtered period bounds
+    min_f = pd.to_datetime(filtered["Date"]).min()
+    max_f = pd.to_datetime(filtered["Date"]).max()
+    def classify(c):
+        fs = ft_map.get(c, pd.NaT)
+        if pd.isna(fs) or pd.isna(min_f) or pd.isna(max_f):
+            return "Returning"  # conservative
+        return "First-time" if (fs >= min_f and fs <= max_f) else "Returning"
+    filtered["Client Type"] = filtered["Client"].astype(str).apply(classify)
+else:
+    filtered["Client Type"] = "Returning"
+
+# KPI row for FT vs Returning
+ft_clients = filtered[filtered["Client Type"]=="First-time"]["Client"].nunique() if "Client" in filtered else 0
+rt_clients = filtered[filtered["Client Type"]=="Returning"]["Client"].nunique() if "Client" in filtered else 0
+ft_rev = float(filtered.loc[filtered["Client Type"]=="First-time","Amount"].sum())
+rt_rev = float(filtered.loc[filtered["Client Type"]=="Returning","Amount"].sum())
+
+k5, k6, k7, k8 = st.columns(4)
+with k5:
+    st.markdown(f'<div class="kpi-card"><div class="kpi-label">First-time Clients</div><div class="kpi-value">{ft_clients:,}</div></div>', unsafe_allow_html=True)
+with k6:
+    st.markdown(f'<div class="kpi-card"><div class="kpi-label">Returning Clients</div><div class="kpi-value">{rt_clients:,}</div></div>', unsafe_allow_html=True)
+with k7:
+    st.markdown(f'<div class="kpi-card"><div class="kpi-label">First-time Revenue</div><div class="kpi-value">${ft_rev:,.2f}</div></div>', unsafe_allow_html=True)
+with k8:
+    st.markdown(f'<div class="kpi-card"><div class="kpi-label">Returning Revenue</div><div class="kpi-value">${rt_rev:,.2f}</div></div>', unsafe_allow_html=True)
+
+# ====== Charts (use Streamlit built-ins, no external deps) ======
+c_left, c_right = st.columns(2)
 with c_left:
     if "Service" in filtered and not filtered.empty:
-        by_service = filtered.groupby("Service", dropna=False)["Amount"].sum().reset_index().sort_values("Amount", ascending=False)
-        fig = px.bar(by_service.head(20), x="Service", y="Amount", title="Revenue by Service")
-        fig.update_layout(height=CHART_HEIGHT, xaxis_title="Service", yaxis_title="Revenue")
-        st.plotly_chart(fig, use_container_width=True)
+        by_service = filtered.groupby("Service", dropna=False)["Amount"].sum().sort_values(ascending=False).head(20)
+        st.markdown("#### Revenue by Service")
+        st.bar_chart(by_service)
     else:
         st.info("No service data available.")
 
-# Revenue by Provider
 with c_right:
     if "Provider" in filtered and not filtered.empty:
-        by_provider = filtered.groupby("Provider", dropna=False)["Amount"].sum().reset_index().sort_values("Amount", ascending=False)
-        fig = px.bar(by_provider.head(20), x="Provider", y="Amount", title="Revenue by Provider")
-        fig.update_layout(height=CHART_HEIGHT, xaxis_title="Provider", yaxis_title="Revenue")
-        st.plotly_chart(fig, use_container_width=True)
+        by_provider = filtered.groupby("Provider", dropna=False)["Amount"].sum().sort_values(ascending=False).head(20)
+        st.markdown("#### Revenue by Provider")
+        st.bar_chart(by_provider)
     else:
         st.info("No provider data available.")
 
-# Revenue over Time
 st.markdown("#### Revenue Over Time")
 if "Date" in filtered and not filtered.empty:
     by_day = filtered.dropna(subset=["Date"]).copy()
-    by_day["Day"] = by_day["Date"].dt.date
-    by_day = by_day.groupby("Day")["Amount"].sum().reset_index().sort_values("Day")
-    fig_line = px.line(by_day, x="Day", y="Amount", title="Daily Revenue")
-    fig_line.update_layout(height=CHART_HEIGHT, xaxis_title="Date", yaxis_title="Revenue")
-    st.plotly_chart(fig_line, use_container_width=True)
+    by_day["Day"] = pd.to_datetime(by_day["Date"]).dt.date
+    by_day = by_day.groupby("Day")["Amount"].sum().sort_index()
+    st.line_chart(by_day)
 else:
     st.info("No dated revenue rows to chart.")
 
 # ====== Tables ======
 st.markdown("#### Line Items (Filtered)")
-
 display = filtered.copy()
 if "Date" in display.columns:
     display["Date"] = pd.to_datetime(display["Date"], errors="coerce").dt.strftime("%b %d, %Y")
-for col in ["Client","Provider","Service","Amount","Date"]:
+for col in ["Client","Client Type","Provider","Service","Amount","Date"]:
     if col not in display.columns:
         display[col] = ""
-display = display[["Client","Provider","Service","Amount","Date"]]
+display = display[["Client","Client Type","Provider","Service","Amount","Date"]]
 
 csv = filtered.to_csv(index=False).encode("utf-8")
 st.download_button("Export CSV", csv, file_name="spa_filtered_line_items.csv", mime="text/csv")
-
 st.dataframe(display, use_container_width=True, height=520)
 
-# ====== Client Lifetime Value (Total Spend) ======
+# ====== Client Lifetime Value ======
 st.markdown("#### Client Lifetime Value (Total Spend)")
 ltv = pd.DataFrame()
 if "Client" in facts and "Amount" in facts:
@@ -368,4 +356,5 @@ if "Client" in facts and "Amount" in facts:
     ltv.rename(columns={"Client":"Client","Amount":"Total Spend"}, inplace=True)
 st.dataframe(ltv, use_container_width=True, height=360)
 
-st.caption("Tip: Column names are auto-detected. For best results, use headers like Client, Provider, Service, Date, Amount.")
+st.caption("Definitions: First-time = client whose first-ever appointment date falls inside the current date filter. Returning = any other client active in the period.")
+
