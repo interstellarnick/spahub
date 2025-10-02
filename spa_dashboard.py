@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -25,7 +24,8 @@ st.markdown(
 def read_csv_robust(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
-    for sep in [",",";","\\t","|"]:
+    # Robust sep detection
+    for sep in [",",";","\t","|"]:
         try:
             df = pd.read_csv(path, sep=sep, engine="python")
             if df.shape[1] == 1 and df.iloc[:10,0].astype(str).str.contains(sep).any():
@@ -50,8 +50,8 @@ def pick_col(cands, cols):
     return None
 
 def coerce_money(s: pd.Series) -> pd.Series:
-    s = s.astype(str).str.replace(r"[\\$,]", "", regex=True)
-    s = s.str_replace(r"[^0-9.\\-]", "", regex=True)
+    s = s.astype(str).str.replace(r"[\$,]", "", regex=True)
+    s = s.str.replace(r"[^0-9.\-]", "", regex=True)
     return pd.to_numeric(s, errors="coerce")
 
 def date_range_presets():
@@ -87,13 +87,25 @@ def apply_date_filter(df, col, sel_time, custom_start, custom_end, period_anchor
     return f, anchor_date
 
 # ====== Default repo-friendly paths ======
-DATA_DIR = Path("data")
-DEFAULT_APPTS = DATA_DIR / "appointments_with_google_flag.csv"
-DEFAULT_LINES = DATA_DIR / "Checkout Line Items-2025-09-25.csv"
+DATA_DIR = (Path(__file__).parent / "data").resolve()
+APPTS_NAME = "appointments_with_google_flag.csv"
+LINES_NAME = "Checkout Line Items.csv"
 
-# Fallback for this environment
+DEFAULT_APPTS = DATA_DIR / APPTS_NAME
+DEFAULT_LINES = DATA_DIR / LINES_NAME
+
+# Optional fallbacks for local runs
 FALLBACK_APPTS = Path("/mnt/data/appointments_with_google_flag.csv")
-FALLBACK_LINES = Path("/mnt/data/Checkout Line Items-2025-09-25.csv")
+FALLBACK_LINES = Path("/mnt/data/Checkout Line Items.csv")
+
+st.caption(f"Looking for data in: `{DATA_DIR}`")
+if DATA_DIR.exists():
+    try:
+        st.caption("Found in /data: " + ", ".join(sorted(p.name for p in DATA_DIR.iterdir())))
+    except Exception:
+        pass
+else:
+    st.warning("`data/` folder not found next to spa_dashboard.py. Create it and put your CSVs inside.")
 
 appts = read_csv_robust(DEFAULT_APPTS) if DEFAULT_APPTS.exists() else read_csv_robust(FALLBACK_APPTS)
 lines = read_csv_robust(DEFAULT_LINES) if DEFAULT_LINES.exists() else read_csv_robust(FALLBACK_LINES)
@@ -132,11 +144,9 @@ APPT_SERVICE = pick_col(["Service","Services","Service Name","Menu Item","Item",
 APPT_PROVIDER = pick_col(["Provider","Employee","Staff","Service Provider","Artist","Technician","Therapist"], appts.columns)
 APPT_ID = pick_col(["Appointment ID","Appt ID","ID","Ticket ID","Order ID","Invoice ID"], appts.columns)
 
-# Status / No-show detection
 STATUS_COL = pick_col(["Status","Appointment Status","Appt Status","Booking Status"], appts.columns)
 NO_SHOW_COL = pick_col(["No Show","No-Show","Noshow","Is No Show","NoShow"], appts.columns)
 
-# Google Ads flag
 GOOGLE_FLAG_COL = pick_col(["Booked via Google Ads","Google Ads","GoogleAds","Is Google Ads","Google Flag"], appts.columns)
 BOOKING_SOURCE_COL = pick_col(["Source","Booking Source","Lead Source","Acquisition Channel"], appts.columns)
 
@@ -155,10 +165,6 @@ def derive_google_flag(df: pd.DataFrame) -> pd.Series:
 APPT_GOOGLE_FLAG = "__GoogleAds"
 appts[APPT_GOOGLE_FLAG] = derive_google_flag(appts)
 
-# Dates
-if APPT_DATE and APPT_DATE in appts.columns:
-    appts[APPT_DATE] = pd.to_datetime(appts[APPT_DATE], errors="coerce", infer_datetime_format=True)
-
 SALE_DATE = pick_col(["Date","Sale Date","Checkout Date","Created At","Closed At","Completed At","Date Succeeded"], lines.columns)
 SALE_CLIENT = pick_col(["Client","Customer","Client Name","Customer Name","Name"], lines.columns)
 SALE_SERVICE = pick_col(["Service","Item","Product","Line Item","Service Name","Menu Item","Category"], lines.columns)
@@ -166,6 +172,9 @@ SALE_PROVIDER = pick_col(["Provider","Employee","Staff","Service Provider","Arti
 SALE_AMOUNT = pick_col(["Total","Amount","Price","Line Total","Subtotal","Net","Revenue","Price"], lines.columns)
 SALE_TICKET = pick_col(["Appointment ID","Appt ID","Ticket ID","Order ID","Invoice ID","Sale ID","Checkout ID"], lines.columns)
 
+# Dates
+if APPT_DATE and APPT_DATE in appts.columns:
+    appts[APPT_DATE] = pd.to_datetime(appts[APPT_DATE], errors="coerce", infer_datetime_format=True)
 if SALE_DATE and SALE_DATE in lines.columns:
     lines[SALE_DATE] = pd.to_datetime(lines[SALE_DATE], errors="coerce", infer_datetime_format=True)
 
@@ -176,7 +185,7 @@ else:
     lines["__AMT__"] = 0.0
     SALE_AMOUNT = "__AMT__"
 
-# ====== Build facts and join appointment fields ======
+# ====== Build facts safely (even if lines is empty) ======
 facts = pd.DataFrame()
 if not lines.empty:
     facts["Date"] = lines[SALE_DATE] if SALE_DATE in lines.columns else pd.NaT
@@ -184,41 +193,69 @@ if not lines.empty:
     facts["Service_Line"] = lines[SALE_SERVICE] if SALE_SERVICE in lines.columns else ""
     facts["Provider"] = lines[SALE_PROVIDER] if SALE_PROVIDER in lines.columns else ""
     facts["Amount"] = lines[SALE_AMOUNT] if SALE_AMOUNT in lines.columns else 0.0
+else:
+    facts = pd.DataFrame({
+        "Date": pd.Series(dtype="datetime64[ns]"),
+        "Client": pd.Series(dtype="object"),
+        "Service_Line": pd.Series(dtype="object"),
+        "Provider": pd.Series(dtype="object"),
+        "Amount": pd.Series(dtype="float"),
+    })
 
+# Ensure join-derived columns exist before use
+if "Service_Appt" not in facts.columns:
     facts["Service_Appt"] = ""
+if "Booked via Google Ads" not in facts.columns:
     facts["Booked via Google Ads"] = False
-    if SALE_TICKET and APPT_ID and SALE_TICKET in lines.columns and APPT_ID in appts.columns:
-        try:
-            svc_map = appts[[APPT_ID, APPT_SERVICE]].drop_duplicates() if APPT_SERVICE else appts[[APPT_ID]].copy()
-            if APPT_SERVICE and APPT_SERVICE not in svc_map.columns:
-                appts["__svc"] = ""
-                svc_map = appts[[APPT_ID, "__svc"]].rename(columns={"__svc": APPT_SERVICE})
-            svc_map = svc_map.rename(columns={APPT_ID: "__JOIN__", APPT_SERVICE: "__ApptService"})
-            flag_map = appts[[APPT_ID, APPT_GOOGLE_FLAG]].rename(columns={APPT_ID:"__JOIN__", APPT_GOOGLE_FLAG:"__GoogleFlag"})
-            tmp = lines[[SALE_TICKET]].rename(columns={SALE_TICKET: "__JOIN__"}).join(svc_map.set_index("__JOIN__"), on="__JOIN__")
-            tmp = tmp.join(flag_map.set_index("__JOIN__"), on="__JOIN__")
-            facts["Service_Appt"] = tmp["__ApptService"].values if "__ApptService" in tmp.columns else ""
-            facts["Booked via Google Ads"] = tmp["__GoogleFlag"].fillna(False).astype(bool).values if "__GoogleFlag" in tmp.columns else False
-        except Exception:
-            pass
 
+# Join appointment service + google flag by ID, if present
+if SALE_TICKET and APPT_ID and (SALE_TICKET in lines.columns) and (APPT_ID in appts.columns):
+    try:
+        # Service from appointments
+        if APPT_SERVICE:
+            svc_map = appts[[APPT_ID, APPT_SERVICE]].drop_duplicates().rename(
+                columns={APPT_ID: "__JOIN__", APPT_SERVICE: "__ApptService"}
+            )
+            tmp = lines[[SALE_TICKET]].rename(columns={SALE_TICKET: "__JOIN__"}).join(
+                svc_map.set_index("__JOIN__"), on="__JOIN__"
+            )
+            facts["Service_Appt"] = tmp.get("__ApptService", "")
+        # Google flag
+        flag_map = appts[[APPT_ID, APPT_GOOGLE_FLAG]].rename(
+            columns={APPT_ID: "__JOIN__", APPT_GOOGLE_FLAG: "__GoogleFlag"}
+        )
+        tmp2 = lines[[SALE_TICKET]].rename(columns={SALE_TICKET: "__JOIN__"}).join(
+            flag_map.set_index("__JOIN__"), on="__JOIN__"
+        )
+        facts["Booked via Google Ads"] = tmp2.get("__GoogleFlag", False).fillna(False).astype(bool)
+    except Exception:
+        pass
+
+# Prefer appointment service; fallback to line-item service
 facts["Service_XAxis"] = facts["Service_Appt"].astype(str).where(
-    facts["Service_Appt"].astype(str).str.strip() != "", facts["Service_Line"].astype(str)
+    facts["Service_Appt"].astype(str).str.strip() != "",
+    facts["Service_Line"].astype(str)
 )
 
 # Backfill provider via appointments if missing
-if (("Provider" not in facts.columns) or (facts["Provider"].astype(str).str.strip().eq("").all())) and SALE_TICKET and APPT_ID and APPT_PROVIDER:
+if (facts["Provider"].astype(str).str.strip().eq("").all() if "Provider" in facts.columns else True) and SALE_TICKET and APPT_ID and APPT_PROVIDER:
     try:
-        prov_map = appts[[APPT_ID, APPT_PROVIDER]].drop_duplicates().rename(columns={APPT_ID:"__JOIN__", APPT_PROVIDER:"__ApptProv"})
-        tmp2 = lines[[SALE_TICKET]].rename(columns={SALE_TICKET:"__JOIN__"}).join(prov_map.set_index("__JOIN__"), on="__JOIN__")
-        facts["Provider"] = facts["Provider"].mask(facts["Provider"].astype(str).str.strip().eq(""), tmp2["__ApptProv"])
+        prov_map = appts[[APPT_ID, APPT_PROVIDER]].drop_duplicates().rename(
+            columns={APPT_ID: "__JOIN__", APPT_PROVIDER: "__ApptProv"}
+        )
+        tmp3 = lines[[SALE_TICKET]].rename(columns={SALE_TICKET: "__JOIN__"}).join(
+            prov_map.set_index("__JOIN__"), on="__JOIN__"
+        )
+        if "Provider" not in facts.columns:
+            facts["Provider"] = ""
+        facts["Provider"] = facts["Provider"].mask(facts["Provider"].astype(str).str.strip().eq(""), tmp3.get("__ApptProv"))
     except Exception:
         pass
 
 # ====== Filters ======
 time_options = date_range_presets()
-providers = ["All Providers"] + (sorted([str(x) for x in facts["Provider"].dropna().unique().tolist()]) if "Provider" in facts.columns else [])
-services = ["All Services"] + (sorted([str(x) for x in facts["Service_XAxis"].dropna().unique().tolist()]) if "Service_XAxis" in facts.columns else [])
+providers = ["All Providers"] + (sorted([str(x) for x in facts.get("Provider", pd.Series(dtype=object)).dropna().unique().tolist()]))
+services = ["All Services"] + (sorted([str(x) for x in facts.get("Service_XAxis", pd.Series(dtype=object)).dropna().unique().tolist()]))
 
 c1, c2, c3, c4 = st.columns([1.2,1.2,1,1])
 with c1:
@@ -243,7 +280,7 @@ if sel_time == "Custom range":
         default_end = (appts[APPT_DATE].max().date() if APPT_DATE and appts[APPT_DATE].notna().any() else date.today())
         custom_end = st.date_input("End date", value=default_end)
 
-# ====== Apply filters to facts ======
+# ====== Apply filters ======
 facts["Date"] = pd.to_datetime(facts["Date"], errors="coerce")
 facts["Amount"] = pd.to_numeric(facts["Amount"], errors="coerce").fillna(0.0)
 
@@ -264,18 +301,17 @@ if q:
             mask |= filtered[c].astype(str).str.lower().str.contains(ql, na=False)
     filtered = filtered[mask]
 
-# ====== Also filter appointments for appointment-based KPIs (returning, cancels, no-shows) ======
+# ====== Also filter appointments for appointment-based KPIs ======
 appts_filtered = appts.copy()
 if APPT_DATE and APPT_DATE in appts_filtered.columns:
     appts_filtered[APPT_DATE] = pd.to_datetime(appts_filtered[APPT_DATE], errors="coerce")
     appts_filtered, _ = apply_date_filter(appts_filtered, APPT_DATE, sel_time, custom_start, custom_end, period_anchor, appts_filtered[APPT_DATE].dt.date)
-
 if sel_provider != "All Providers" and APPT_PROVIDER and APPT_PROVIDER in appts_filtered.columns:
     appts_filtered = appts_filtered[appts_filtered[APPT_PROVIDER].astype(str) == sel_provider]
 
 # ====== KPIs ======
-unique_clients = int(filtered["Client"].astype(str).str.strip().replace({"":"__NA__"}).nunique()) if "Client" in filtered else 0
-total_revenue = float(filtered["Amount"].sum()) if "Amount" in filtered else 0.0
+unique_clients = int(filtered.get("Client", pd.Series(dtype=object)).astype(str).str.strip().replace({"":"__NA__"}).nunique())
+total_revenue = float(filtered.get("Amount", pd.Series(dtype=float)).sum())
 
 # Recurring / return rate
 recurring_clients = 0
@@ -286,23 +322,20 @@ if APPT_CLIENT and APPT_DATE and not appts_filtered.empty:
     base_clients = int(appts_filtered[APPT_CLIENT].astype(str).nunique())
     return_rate = (recurring_clients / base_clients) if base_clients else 0.0
 
-# First-time vs Returning (revenue and counts based on facts + first-ever from appointments)
+# First-time vs Returning (based on first-ever appointment date)
 ft_clients = rt_clients = 0
 ft_rev = rt_rev = 0.0
 if APPT_CLIENT and APPT_DATE and not appts.empty and "Client" in filtered and "Date" in filtered:
     appts_nonnull = appts.dropna(subset=[APPT_CLIENT, APPT_DATE]).copy()
     appts_nonnull[APPT_DATE] = pd.to_datetime(appts_nonnull[APPT_DATE], errors="coerce")
     first_seen = appts_nonnull.groupby(APPT_CLIENT)[APPT_DATE].min()
-
     min_f = pd.to_datetime(filtered["Date"]).min()
     max_f = pd.to_datetime(filtered["Date"]).max()
-
     def classify(c):
         fs = first_seen.get(c, pd.NaT)
         if pd.isna(fs) or pd.isna(min_f) or pd.isna(max_f):
             return "Returning"
         return "First-time" if (fs >= min_f and fs <= max_f) else "Returning"
-
     filtered["Client Type"] = filtered["Client"].astype(str).apply(classify)
     ft_clients = filtered.loc[filtered["Client Type"]=="First-time","Client"].nunique()
     rt_clients = filtered.loc[filtered["Client Type"]=="Returning","Client"].nunique()
@@ -316,17 +349,13 @@ cancel_appts = noshow_appts = 0
 if not appts_filtered.empty:
     status_series = appts_filtered[STATUS_COL].astype(str).str.lower() if STATUS_COL else pd.Series([""]*len(appts_filtered), index=appts_filtered.index)
     no_show_series = appts_filtered[NO_SHOW_COL] if NO_SHOW_COL else pd.Series([None]*len(appts_filtered), index=appts_filtered.index)
-
-    # derive flags
     cancel_flag = status_series.str.contains("cancel", na=False)
     noshow_flag = status_series.str.contains("no[-\\s]?show", na=False)
     if no_show_series.notna().any():
-        # if explicit boolean/text exists, OR it with derived
         if pd.api.types.is_bool_dtype(no_show_series):
             noshow_flag = noshow_flag | no_show_series.fillna(False)
         else:
             noshow_flag = noshow_flag | no_show_series.astype(str).str.lower().isin(["true","1","yes","y","no show","no-show","noshow"])
-
     cancel_appts = int(cancel_flag.sum())
     noshow_appts = int(noshow_flag.sum())
 
@@ -355,7 +384,7 @@ k9, k10 = st.columns(2)
 with k9:
     st.markdown(f'<div class="kpi-card"><div class="kpi-label">Canceled Appointments</div><div class="kpi-value">{cancel_appts:,}</div></div>', unsafe_allow_html=True)
 with k10:
-    st.markdown(f'<div class="kpi-card"><div class="kpi-label">No‑Show Appointments</div><div class="kpi-value">{noshow_appts:,}</div></div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="kpi-card"><div class="kpi-label">No-Show Appointments</div><div class="kpi-value">{noshow_appts:,}</div></div>', unsafe_allow_html=True)
 
 # ====== Google Ads Revenue caption ======
 google_revenue = float(filtered.loc[filtered.get("Booked via Google Ads", pd.Series([], dtype=bool)).fillna(False), "Amount"].sum()) if not filtered.empty else 0.0
@@ -385,7 +414,7 @@ if "Date" in filtered and not filtered.empty:
 else:
     st.info("No dated revenue rows to chart.")
 
-# ====== Tables with row highlighting for Google Ads ======
+# ====== Table with Google Ads highlight ======
 st.markdown("#### Line Items (Filtered) — Google Ads highlighted")
 display = filtered.copy()
 if "Date" in display.columns:
@@ -416,4 +445,4 @@ if "Client" in filtered and "Amount" in filtered:
     ltv.rename(columns={"Client":"Client","Amount":"Total Spend"}, inplace=True)
 st.dataframe(ltv, use_container_width=True, height=360)
 
-st.caption("Definitions: First-time = client whose first-ever appointment date falls within the current date filter. Cancel/No‑show derived from appointment status columns.")
+st.caption("Tips: Put CSVs in ./data. First-time = first-ever appt within the current date filter. Cancel/No-show derived from Status/No-Show columns.")
